@@ -1,0 +1,109 @@
+name: Clone Repo with Auto-Generated Name
+
+# Trigger manually and pass the repo you want cloned as the "scope"
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Repository to clone (format: owner/repo)'
+        required: true
+        type: string
+      target_org:
+        description: 'Organization where the new repo will be created'
+        required: true
+        default: 'Kallwik'
+        type: string
+      visibility:
+        description: 'Visibility of the new repo'
+        required: false
+        default: 'private'
+        type: choice
+        options:
+          - private
+          - public
+          - internal
+
+jobs:
+  clone-and-create:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Generate a unique name for the new repo
+      # ------------------------------------------------------------
+      - name: Generate new repo name
+        id: gen_name
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+        run: |
+          SOURCE_NAME=$(basename "$SOURCE_REPO")
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          NEW_REPO_NAME="${SOURCE_NAME}-clone-${TIMESTAMP}"
+          echo "new_repo_name=$NEW_REPO_NAME" >> "$GITHUB_OUTPUT"
+          echo "Generated repo name: $NEW_REPO_NAME"
+
+      # ------------------------------------------------------------
+      # 2. Create the new (empty) repository
+      # ------------------------------------------------------------
+      - name: Create new repository
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          TARGET_ORG: ${{ inputs.target_org }}
+          NEW_REPO_NAME: ${{ steps.gen_name.outputs.new_repo_name }}
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          gh repo create "$TARGET_ORG/$NEW_REPO_NAME" "--$VISIBILITY"
+
+      # ------------------------------------------------------------
+      # 3. Mirror-clone the source repo into the new repo
+      #    (full history, all branches and tags)
+      # ------------------------------------------------------------
+      - name: Mirror-clone source repo into new repo
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          TARGET_ORG: ${{ inputs.target_org }}
+          NEW_REPO_NAME: ${{ steps.gen_name.outputs.new_repo_name }}
+        run: |
+          git clone --mirror "https://x-access-token:${GH_TOKEN}@github.com/${SOURCE_REPO}.git" source.git
+          cd source.git
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_ORG}/${NEW_REPO_NAME}.git"
+          git push --mirror origin
+
+      # ------------------------------------------------------------
+      # 4. Copy custom properties from the source repo to the new one
+      #    (requires both repos to belong to orgs that share the
+      #    same custom-property schema, e.g. same org)
+      # ------------------------------------------------------------
+      - name: Copy custom properties
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          TARGET_ORG: ${{ inputs.target_org }}
+          NEW_REPO_NAME: ${{ steps.gen_name.outputs.new_repo_name }}
+        run: |
+          gh api "/repos/${SOURCE_REPO}/properties/values" > source_props.json
+
+          PROP_COUNT=$(jq 'length' source_props.json)
+          if [ "$PROP_COUNT" -eq 0 ]; then
+            echo "No custom properties set on source repo, skipping."
+            exit 0
+          fi
+
+          jq '{properties: map({property_name, value})}' source_props.json > payload.json
+
+          gh api \
+            --method PATCH \
+            "/repos/${TARGET_ORG}/${NEW_REPO_NAME}/properties/values" \
+            --input payload.json
+
+      # ------------------------------------------------------------
+      # 5. Summary
+      # ------------------------------------------------------------
+      - name: Summary
+        env:
+          TARGET_ORG: ${{ inputs.target_org }}
+          NEW_REPO_NAME: ${{ steps.gen_name.outputs.new_repo_name }}
+        run: |
+          echo "### Repo cloned successfully" >> "$GITHUB_STEP_SUMMARY"
+          echo "New repo: https://github.com/${TARGET_ORG}/${NEW_REPO_NAME}" >> "$GITHUB_STEP_SUMMARY"
