@@ -76,7 +76,10 @@ jobs:
           git clone --mirror "https://x-access-token:${GH_TOKEN}@github.com/${SOURCE_REPO}.git" source.git
           cd source.git
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_ORG}/${NEW_REPO_NAME}.git"
-          git push --mirror origin
+          # Push branches and tags only — GitHub always rejects refs/pull/*
+          # (its own auto-managed PR refs), so a full --mirror push fails.
+          git push origin 'refs/heads/*:refs/heads/*'
+          git push origin 'refs/tags/*:refs/tags/*'
 
       # ------------------------------------------------------------
       # 4. Summary
