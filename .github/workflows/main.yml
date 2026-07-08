@@ -1,21 +1,17 @@
-name: Clone Repo with Custom Name
+name: Clone Repo to New Repo
 
-# Trigger manually and pass the source repo + the name you want for the new repo
+# Trigger manually: give the link to the repo you want cloned,
+# and the name for the new repo that will be created in Kallwik.
 on:
   workflow_dispatch:
     inputs:
-      source_repo:
-        description: 'Repository to clone (format: owner/repo)'
+      target_repo_url:
+        description: 'Link of the repo to clone (e.g. https://github.com/owner/repo)'
         required: true
         type: string
       new_repo_name:
-        description: 'Name for the new repo (no owner/org prefix)'
+        description: 'Name for the new repo to create in Kallwik'
         required: true
-        type: string
-      target_org:
-        description: 'Organization where the new repo will be created'
-        required: true
-        default: 'Kallwik'
         type: string
       visibility:
         description: 'Visibility of the new repo'
@@ -27,39 +23,45 @@ on:
           - public
           - internal
 
+env:
+  TARGET_ORG: Kallwik
+
 jobs:
   clone-and-create:
     runs-on: ubuntu-latest
 
     steps:
       # ------------------------------------------------------------
-      # 1. Create the new (empty) repository
+      # 1. Parse owner/repo out of the given URL
+      # ------------------------------------------------------------
+      - name: Parse source repo from URL
+        id: parse
+        env:
+          TARGET_REPO_URL: ${{ inputs.target_repo_url }}
+        run: |
+          # Strip trailing slash, ".git" suffix, and protocol/host
+          CLEAN_URL="${TARGET_REPO_URL%/}"
+          CLEAN_URL="${CLEAN_URL%.git}"
+          SOURCE_REPO=$(echo "$CLEAN_URL" | sed -E 's#^https?://github\.com/##')
+
+          if [[ -z "$SOURCE_REPO" || "$SOURCE_REPO" != *"/"* ]]; then
+            echo "::error::Could not parse owner/repo from '$TARGET_REPO_URL'. Expected format: https://github.com/owner/repo"
+            exit 1
+          fi
+
+          echo "source_repo=$SOURCE_REPO" >> "$GITHUB_OUTPUT"
+          echo "Resolved source repo: $SOURCE_REPO"
+
+      # ------------------------------------------------------------
+      # 2. Create the new (empty) repository in Kallwik
       # ------------------------------------------------------------
       - name: Create new repository
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          TARGET_ORG: ${{ inputs.target_org }}
           NEW_REPO_NAME: ${{ inputs.new_repo_name }}
           VISIBILITY: ${{ inputs.visibility }}
         run: |
           gh repo create "$TARGET_ORG/$NEW_REPO_NAME" "--$VISIBILITY"
-
-      # ------------------------------------------------------------
-      # 2. Normalize source_repo (allow "repo" or "owner/repo")
-      # ------------------------------------------------------------
-      - name: Normalize source repo
-        id: normalize
-        env:
-          SOURCE_REPO: ${{ inputs.source_repo }}
-          TARGET_ORG: ${{ inputs.target_org }}
-        run: |
-          if [[ "$SOURCE_REPO" == *"/"* ]]; then
-            FULL_SOURCE_REPO="$SOURCE_REPO"
-          else
-            FULL_SOURCE_REPO="${TARGET_ORG}/${SOURCE_REPO}"
-          fi
-          echo "full_source_repo=$FULL_SOURCE_REPO" >> "$GITHUB_OUTPUT"
-          echo "Resolved source repo: $FULL_SOURCE_REPO"
 
       # ------------------------------------------------------------
       # 3. Mirror-clone the source repo into the new repo
@@ -68,8 +70,7 @@ jobs:
       - name: Mirror-clone source repo into new repo
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          SOURCE_REPO: ${{ steps.normalize.outputs.full_source_repo }}
-          TARGET_ORG: ${{ inputs.target_org }}
+          SOURCE_REPO: ${{ steps.parse.outputs.source_repo }}
           NEW_REPO_NAME: ${{ inputs.new_repo_name }}
         run: |
           git clone --mirror "https://x-access-token:${GH_TOKEN}@github.com/${SOURCE_REPO}.git" source.git
@@ -78,38 +79,10 @@ jobs:
           git push --mirror origin
 
       # ------------------------------------------------------------
-      # 4. Copy custom properties from the source repo to the new one
-      #    (requires both repos to belong to orgs that share the
-      #    same custom-property schema, e.g. same org)
-      # ------------------------------------------------------------
-      - name: Copy custom properties
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          SOURCE_REPO: ${{ steps.normalize.outputs.full_source_repo }}
-          TARGET_ORG: ${{ inputs.target_org }}
-          NEW_REPO_NAME: ${{ inputs.new_repo_name }}
-        run: |
-          gh api "/repos/${SOURCE_REPO}/properties/values" > source_props.json
-
-          PROP_COUNT=$(jq 'length' source_props.json)
-          if [ "$PROP_COUNT" -eq 0 ]; then
-            echo "No custom properties set on source repo, skipping."
-            exit 0
-          fi
-
-          jq '{properties: map({property_name, value})}' source_props.json > payload.json
-
-          gh api \
-            --method PATCH \
-            "/repos/${TARGET_ORG}/${NEW_REPO_NAME}/properties/values" \
-            --input payload.json
-
-      # ------------------------------------------------------------
-      # 5. Summary
+      # 4. Summary
       # ------------------------------------------------------------
       - name: Summary
         env:
-          TARGET_ORG: ${{ inputs.target_org }}
           NEW_REPO_NAME: ${{ inputs.new_repo_name }}
         run: |
           echo "### Repo cloned successfully" >> "$GITHUB_STEP_SUMMARY"
